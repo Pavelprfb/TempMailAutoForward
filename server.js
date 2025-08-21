@@ -4,11 +4,32 @@ import axios from 'axios';
 import nodemailer from 'nodemailer';
 import { v4 as uuidv4 } from 'uuid';
 import express from 'express';
+import mongoose from 'mongoose';
 
+// ================== MongoDB Connect ==================
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+});
+const db = mongoose.connection;
+db.on('error', console.error.bind(console, 'MongoDB connection error:'));
+db.once('open', () => console.log('[MONGO] Connected'));
+
+// ================== Schema ==================
+const mailSchema = new mongoose.Schema({
+  address: String,
+  password: String,
+  token: String,
+  seen: [String],
+  createdAt: { type: Date, default: Date.now }
+});
+const Mail = mongoose.model('Mail', mailSchema);
+
+// ======================================================
 const MAILTM_BASE = process.env.MAILTM_BASE || 'https://api.mail.tm';
 const FORWARD_TO = process.env.FORWARD_TO;
-const POLL_INTERVAL_MS = 5000; // inbox check every 5 sec
-const CREATE_INTERVAL_MS = 10000; // create new mail every 10 sec
+const POLL_INTERVAL_MS = 5000; 
+const CREATE_INTERVAL_MS = 60000; // প্রতি ১ মিনিটে নতুন মেইল
 
 // Gmail SMTP config
 const transporter = nodemailer.createTransport({
@@ -19,15 +40,29 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Load or init mail.json
+// Local array রাখবো (memory তে)
 let mailData = [];
-if (fs.existsSync('mail.json')) {
-  mailData = JSON.parse(fs.readFileSync('mail.json', 'utf8') || '[]');
-} else {
-  fs.writeFileSync('mail.json', '[]');
+
+// Load from Mongo instead of JSON
+async function loadMails() {
+  const mails = await Mail.find({});
+  mailData = mails.map(m => m.toObject());
+  console.log(`[LOADED] ${mailData.length} mails from MongoDB`);
+  for (const m of mailData) pollInbox(m);
 }
 
-// Create new temp mail
+// Save single mail to Mongo
+async function saveMail(record) {
+  const mail = new Mail(record);
+  await mail.save();
+}
+
+// Update seen messages in Mongo
+async function updateSeen(address, seen) {
+  await Mail.updateOne({ address }, { $set: { seen } });
+}
+
+// ================== Create new temp mail ==================
 async function createTempMail() {
   try {
     const rnd = uuidv4().slice(0, 8);
@@ -48,7 +83,7 @@ async function createTempMail() {
       createdAt: new Date().toISOString(),
     };
     mailData.push(record);
-    fs.writeFileSync('mail.json', JSON.stringify(mailData, null, 2));
+    await saveMail(record);
 
     console.log(`[NEW MAIL] ${address}`);
     pollInbox(record);
@@ -57,7 +92,7 @@ async function createTempMail() {
   }
 }
 
-// Poll inbox for new messages
+// ================== Poll inbox ==================
 async function pollInbox(info) {
   try {
     const { data } = await axios.get(`${MAILTM_BASE}/messages`, {
@@ -72,7 +107,7 @@ async function pollInbox(info) {
         });
         await forwardMessage(full);
         info.seen.push(m.id);
-        fs.writeFileSync('mail.json', JSON.stringify(mailData, null, 2));
+        await updateSeen(info.address, info.seen);
       }
     }
   } catch (err) {
@@ -82,7 +117,7 @@ async function pollInbox(info) {
   }
 }
 
-// Forward email via Gmail
+// ================== Forward email ==================
 async function forwardMessage(msg) {
   try {
     const mailOptions = {
@@ -98,9 +133,11 @@ async function forwardMessage(msg) {
     console.error(`[FORWARD ERROR] ${err.message}`);
   }
 }
-// Express app to view emails in HTML list with numbering & responsive design
+
+// ================== Express UI ==================
 const app = express();
-app.get('/', (req, res) => {
+app.get('/', async (req, res) => {
+  const mails = await Mail.find({});
   const html = `
   <!DOCTYPE html>
   <html lang="en">
@@ -109,70 +146,20 @@ app.get('/', (req, res) => {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Temp Mails</title>
     <style>
-      body {
-        font-family: Arial, sans-serif;
-        margin: 20px;
-        background: #f9f9f9;
-      }
-      h1 {
-        color: #333;
-        text-align: center;
-      }
-      .mail-list {
-        max-width: 600px;
-        margin: auto;
-        background: #fff;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-      }
-      .mail-item {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px;
-        border-bottom: 1px solid #ddd;
-      }
-      .mail-item:last-child {
-        border-bottom: none;
-      }
-      .mail-address {
-        flex: 1;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        word-break: break-all;
-      }
-      .mail-number {
-        font-weight: bold;
-        color: #555;
-      }
-      button {
-        padding: 5px 10px;
-        background: #4CAF50;
-        color: white;
-        border: none;
-        border-radius: 5px;
-        cursor: pointer;
-      }
-      button:hover {
-        background: #45a049;
-      }
-      @media (max-width: 480px) {
-        .mail-item {
-          flex-direction: column;
-          align-items: flex-start;
-        }
-        button {
-          margin-top: 5px;
-        }
-      }
+      body { font-family: Arial; margin: 20px; background: #f9f9f9; }
+      h1 { text-align: center; }
+      .mail-list { max-width: 600px; margin: auto; background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+      .mail-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #ddd; }
+      .mail-item:last-child { border-bottom: none; }
+      .mail-number { font-weight: bold; color: #555; }
+      button { padding: 5px 10px; background: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; }
+      button:hover { background: #45a049; }
     </style>
   </head>
   <body>
     <h1>📧 Temp Mail List</h1>
     <div class="mail-list">
-      ${mailData.map((m, index) => `
+      ${mails.map((m, index) => `
         <div class="mail-item">
           <div class="mail-address">
             <span class="mail-number">${index + 1}.</span>
@@ -182,7 +169,6 @@ app.get('/', (req, res) => {
         </div>
       `).join('')}
     </div>
-
     <script>
       function copyToClipboard(text) {
         navigator.clipboard.writeText(text).then(() => {
@@ -196,24 +182,12 @@ app.get('/', (req, res) => {
   res.send(html);
 });
 
-
-// Start script
+// ================== Start ==================
 (async () => {
-  // Load old mails
-  if (mailData.length > 0) {
-    console.log(`[LOADED] ${mailData.length} old mails`);
-    for (const m of mailData) pollInbox(m);
-  }
-
-  // Create a new mail immediately
+  await loadMails();
   await createTempMail();
-
-  // Create a new mail every 10 seconds
   setInterval(createTempMail, CREATE_INTERVAL_MS);
 
-  // Start Express server
   const port = process.env.PORT || 3000;
-  app.listen(port, () => {
-    console.log(`[SERVER] Running at http://localhost:${port}`);
-  });
+  app.listen(port, () => console.log(`[SERVER] Running at http://localhost:${port}`));
 })();

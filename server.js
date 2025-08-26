@@ -144,7 +144,8 @@ app.get('/', async (req, res) => {
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Temp Mails</title>
+    <link rel="shortcut icon" href="https://res.cloudinary.com/dkyrj65dl/image/upload/v1755963630/uploads/db5wgv55zlixi9luonge.png" type="image/x-icon" />
+    <title>Temp Mails Auto Forward</title>
     <style>
       body { font-family: Arial; margin: 20px; background: #f9f9f9; }
       h1 { text-align: center; }
